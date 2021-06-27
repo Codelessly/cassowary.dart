@@ -4,6 +4,9 @@
 
 import 'dart:collection';
 
+import '../cassowary.dart';
+import '../cassowary.dart';
+import '../cassowary.dart';
 import 'constraint.dart';
 import 'expression.dart';
 import 'param.dart';
@@ -390,6 +393,17 @@ class Solver {
 
     _edits.remove(variable);
     return Result.success;
+  }
+
+  /// Don't use this.
+  Result removeVariable(Variable variable) {
+    if (_edits.containsKey(variable)) {
+      return Result.duplicateEditVariable;
+    }
+    if (_vars.remove(variable) != null) {
+      return Result.success;
+    }
+    return Result.unknownEditVariable;
   }
 
   /// Returns whether the given edit [Variable] is present in the solver.
