@@ -5,14 +5,6 @@
 import 'dart:collection';
 
 import '../cassowary.dart';
-import '../cassowary.dart';
-import '../cassowary.dart';
-import 'constraint.dart';
-import 'expression.dart';
-import 'param.dart';
-import 'priority.dart';
-import 'result.dart';
-import 'term.dart';
 
 enum _SymbolType { invalid, external, slack, error, dummy }
 
@@ -555,7 +547,9 @@ class Solver {
           tag
             ..marker = errPlus
             ..other = errMinus;
-          row..insertSymbol(errPlus, -1)..insertSymbol(errMinus, 1);
+          row
+            ..insertSymbol(errPlus, -1)
+            ..insertSymbol(errMinus, 1);
           _objective
             ..insertSymbol(errPlus, constraint.priority)
             ..insertSymbol(errMinus, constraint.priority);
@@ -763,6 +757,9 @@ class Solver {
   void _suggestValueForEditInfoWithoutDualOptimization(
       _EditInfo info, double value) {
     final delta = value - info.constant;
+
+    if (info.constant == value) return;
+
     info.constant = value;
 
     {
@@ -787,8 +784,9 @@ class Solver {
       }
     }
 
-    for (final symbol in _rows.keys) {
-      final row = _rows[symbol]!;
+    for (final entry in _rows.entries) {
+      final symbol = entry.key;
+      final row = entry.value;
       final coeff = row.coefficientForSymbol(info.tag.marker);
       if (coeff != 0.0 &&
           row.add(delta * coeff) < 0.0 &&
