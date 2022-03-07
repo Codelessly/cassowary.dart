@@ -33,9 +33,9 @@ class Variable {
   /// Used by the [Solver] to apply updates to this variable. Only updated
   /// variables show up in [Solver] flush results.
   bool applyUpdate(double updated) {
-    final res = updated != value;
+    if (value == updated) return false;
     value = updated;
-    return res;
+    return true;
   }
 }
 

@@ -65,7 +65,9 @@ class _Row {
 
   void insertRow(_Row other, [double coefficient = 1.0]) {
     constant += other.constant * coefficient;
-    other.cells.forEach((s, v) => insertSymbol(s, v * coefficient));
+    for (final entry in other.cells.entries) {
+      insertSymbol(entry.key, entry.value * coefficient);
+    }
   }
 
   void removeSymbol(_Symbol symbol) {
@@ -74,7 +76,9 @@ class _Row {
 
   void reverseSign() {
     constant = -constant;
-    cells.forEach((s, v) => cells[s] = -v);
+    for (final entry in cells.entries) {
+      cells[entry.key] = -entry.value;
+    }
   }
 
   void solveForSymbol(_Symbol symbol) {
@@ -82,7 +86,9 @@ class _Row {
     final coefficient = -1.0 / cells[symbol]!;
     cells.remove(symbol);
     constant *= coefficient;
-    cells.forEach((s, v) => cells[s] = v * coefficient);
+    for (final entry in cells.entries) {
+      cells[entry.key] = entry.value * coefficient;
+    }
   }
 
   void solveForSymbols(_Symbol lhs, _Symbol rhs) {
@@ -107,9 +113,9 @@ class _Row {
   String toString() {
     final buffer = StringBuffer()..write(constant);
 
-    cells.forEach((symbol, value) {
-      buffer.write('${value.toString()} * ${symbol.toString()}');
-    });
+    for (final entry in cells.entries) {
+      buffer.write('${entry.value.toString()} * ${entry.key.toString()}');
+    }
 
     return buffer.toString();
   }
@@ -487,7 +493,9 @@ class Solver {
     }
 
     if (needsCleanup) {
-      applied.reversed.forEach(undoer);
+      for (final item in applied.reversed) {
+        undoer(item);
+      }
     }
 
     return result;
@@ -672,7 +680,10 @@ class Solver {
   _Symbol _leavingSymbolForEnteringSymbol(_Symbol entering) {
     var ratio = double.maxFinite;
     _Symbol? result;
-    _rows.forEach((symbol, row) {
+
+    for (final entry in _rows.entries) {
+      final symbol = entry.key;
+      final row = entry.value;
       if (symbol.type != _SymbolType.external) {
         final temp = row.coefficientForSymbol(entering);
         if (temp < 0.0) {
@@ -683,17 +694,19 @@ class Solver {
           }
         }
       }
-    });
+    }
     return result!;
   }
 
   void _substitute(_Symbol symbol, _Row row) {
-    _rows.forEach((first, second) {
+    for (final entry in _rows.entries) {
+      final first = entry.key;
+      final second = entry.value;
       second.substitute(symbol, row);
       if (first.type != _SymbolType.external && second.constant < 0.0) {
         _infeasibleRows.add(first);
       }
-    });
+    }
     _objective.substitute(symbol, row);
     _artificial.substitute(symbol, row);
   }
@@ -732,10 +745,13 @@ class Solver {
 
     _Symbol? first, second, third;
 
-    _rows.forEach((symbol, row) {
+    for (final entry in _rows.entries) {
+      final symbol = entry.key;
+      final row = entry.value;
+
       final c = row.coefficientForSymbol(marker);
       if (c == 0.0) {
-        return;
+        continue;
       }
       if (symbol.type == _SymbolType.external) {
         third = symbol;
@@ -752,13 +768,15 @@ class Solver {
           second = symbol;
         }
       }
-    });
+    }
 
     return first ?? second ?? third!;
   }
 
   void _suggestValueForEditInfoWithoutDualOptimization(
       _EditInfo info, double value) {
+    if (info.constant == value) return;
+
     final delta = value - info.constant;
     info.constant = value;
 
@@ -851,31 +869,37 @@ class Solver {
       // Tableau
       ..writeln('$separator Tableau');
 
-    _rows.forEach((symbol, row) {
-      buffer.writeln('$symbol | $row');
-    });
+    for (final entry in _rows.entries) {
+      buffer.writeln('${entry.key} | ${entry.value}');
+    }
 
     // Infeasible
     buffer.writeln('$separator Infeasible');
-    _infeasibleRows.forEach(buffer.writeln);
+
+    for (final symbol in _infeasibleRows) {
+      buffer.writeln(symbol);
+    }
 
     // Variables
     buffer.writeln('$separator Variables');
-    _vars.forEach((variable, symbol) {
-      buffer.writeln('$variable = $symbol');
-    });
+
+    for (final entry in _vars.entries) {
+      buffer.writeln('${entry.key} = ${entry.value}');
+    }
 
     // Edit Variables
     buffer.writeln('$separator Edit Variables');
-    _edits.forEach((variable, editinfo) {
-      buffer.writeln(variable);
-    });
+
+    for (final entry in _edits.entries) {
+      buffer.writeln('${entry.key}');
+    }
 
     // Constraints
     buffer.writeln('$separator Constraints');
-    _constraints.forEach((constraint, tag) {
-      buffer.writeln(constraint);
-    });
+
+    for (final entry in _constraints.entries) {
+      buffer.writeln('${entry.key}');
+    }
 
     return buffer.toString();
   }
