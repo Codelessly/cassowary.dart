@@ -424,11 +424,14 @@ class Solver {
   ///   already added the variable to the [Solver], make sure the [Result]
   ///   was `Result.success`.
   Result suggestValueForVariable(Variable variable, double value) {
-    if (!_edits.containsKey(variable)) {
+    final info = _edits[variable];
+    if (info == null) {
       return Result.unknownEditVariable;
     }
 
-    _suggestValueForEditInfoWithoutDualOptimization(_edits[variable]!, value);
+    if (info.constant == value) return Result.success;
+
+    _suggestValueForEditInfoWithoutDualOptimization(info, value);
 
     return _dualOptimize();
   }
@@ -757,9 +760,6 @@ class Solver {
   void _suggestValueForEditInfoWithoutDualOptimization(
       _EditInfo info, double value) {
     final delta = value - info.constant;
-
-    if (info.constant == value) return;
-
     info.constant = value;
 
     {
