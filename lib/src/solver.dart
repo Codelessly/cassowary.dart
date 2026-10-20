@@ -51,15 +51,83 @@ class _Row {
 
   double constant = 0;
 
+  /// The solver's column index while this row is in the tableau, null
+  /// otherwise. Cells added or removed while set are mirrored into it.
+  Map<_Symbol, Set<_Row>>? _columns;
+
+  /// The basic symbol this row is stored under while in the tableau.
+  _Symbol? _basic;
+
+  /// Insertion sequence in the tableau. Used to break ties in the same order
+  /// a full scan of the tableau would.
+  int _order = 0;
+
+  void _cellAdded(_Symbol symbol) {
+    final columns = _columns;
+    if (columns != null) {
+      (columns[symbol] ??= HashSet<_Row>.identity()).add(this);
+    }
+  }
+
+  /// Set only on the objective row: the insertion sequence of each cell, and
+  /// the cells whose coefficient is negative. Lets the solver find the
+  /// entering symbol without scanning the whole objective.
+  Map<_Symbol, int>? _cellOrder;
+  Set<_Symbol>? _negativeCells;
+  int _nextCellOrder = 0;
+
+  void _watchNegativeCells() {
+    final order = _cellOrder = HashMap<_Symbol, int>();
+    final negative = _negativeCells = HashSet<_Symbol>();
+    for (final entry in cells.entries) {
+      order[entry.key] = _nextCellOrder++;
+      if (entry.value < 0.0) negative.add(entry.key);
+    }
+  }
+
+  void _cellValueSet(_Symbol symbol, double value, bool added) {
+    final order = _cellOrder;
+    if (order == null) return;
+    if (added) order[symbol] = _nextCellOrder++;
+    if (value < 0.0) {
+      _negativeCells!.add(symbol);
+    } else {
+      _negativeCells!.remove(symbol);
+    }
+  }
+
+  void _cellRemoved(_Symbol symbol) {
+    final order = _cellOrder;
+    if (order != null) {
+      order.remove(symbol);
+      _negativeCells!.remove(symbol);
+    }
+    final columns = _columns;
+    if (columns != null) {
+      final column = columns[symbol];
+      if (column != null) {
+        column.remove(this);
+        if (column.isEmpty) columns.remove(symbol);
+      }
+    }
+  }
+
   double add(double value) => constant += value;
 
   void insertSymbol(_Symbol symbol, [double coefficient = 1.0]) {
-    final val = cells[symbol] ?? 0.0;
+    final existing = cells[symbol];
+    final val = existing ?? 0.0;
 
     if (_nearZero(val + coefficient)) {
-      cells.remove(symbol);
+      if (existing != null) {
+        cells.remove(symbol);
+        _cellRemoved(symbol);
+      }
     } else {
-      cells[symbol] = val + coefficient;
+      final updated = val + coefficient;
+      cells[symbol] = updated;
+      if (existing == null) _cellAdded(symbol);
+      _cellValueSet(symbol, updated, existing == null);
     }
   }
 
@@ -71,10 +139,11 @@ class _Row {
   }
 
   void removeSymbol(_Symbol symbol) {
-    cells.remove(symbol);
+    if (cells.remove(symbol) != null) _cellRemoved(symbol);
   }
 
   void reverseSign() {
+    assert(_cellOrder == null);
     constant = -constant;
     for (final entry in cells.entries) {
       cells[entry.key] = -entry.value;
@@ -83,8 +152,10 @@ class _Row {
 
   void solveForSymbol(_Symbol symbol) {
     assert(cells.containsKey(symbol));
+    assert(_cellOrder == null);
     final coefficient = -1.0 / cells[symbol]!;
     cells.remove(symbol);
+    _cellRemoved(symbol);
     constant *= coefficient;
     for (final entry in cells.entries) {
       cells[entry.key] = entry.value * coefficient;
@@ -106,6 +177,7 @@ class _Row {
     }
 
     cells.remove(symbol);
+    _cellRemoved(symbol);
     insertRow(row, coefficient);
   }
 
@@ -131,7 +203,59 @@ class Solver {
   final Map<Variable, _Symbol> _vars = {};
   final Map<Variable, _EditInfo> _edits = {};
   final List<_Symbol> _infeasibleRows = [];
-  final _Row _objective = _Row(0);
+  final _Row _objective = _Row(0).._watchNegativeCells();
+
+  /// For every symbol, the tableau rows whose cells contain it. Lets pivots
+  /// and ratio tests visit only the rows a symbol appears in instead of the
+  /// whole tableau, which keeps independent subsystems (such as separate
+  /// canvases) from slowing each other down.
+  final Map<_Symbol, Set<_Row>> _columns = HashMap<_Symbol, Set<_Row>>();
+
+  /// Non-external tableau rows whose constant is negative.
+  final Set<_Row> _negativeRows = HashSet<_Row>.identity();
+
+  int _rowOrder = 0;
+
+  void _putRow(_Symbol symbol, _Row row) {
+    row
+      .._basic = symbol
+      .._order = _rowOrder++
+      .._columns = _columns;
+    for (final cell in row.cells.keys) {
+      row._cellAdded(cell);
+    }
+    _rows[symbol] = row;
+    _trackSign(row);
+  }
+
+  _Row? _takeRow(_Symbol symbol) {
+    final row = _rows.remove(symbol);
+    if (row == null) return null;
+    for (final cell in row.cells.keys) {
+      row._cellRemoved(cell);
+    }
+    row
+      .._columns = null
+      .._basic = null;
+    _negativeRows.remove(row);
+    return row;
+  }
+
+  void _trackSign(_Row row) {
+    if (row._basic!.type != _SymbolType.external && row.constant < 0.0) {
+      _negativeRows.add(row);
+    } else {
+      _negativeRows.remove(row);
+    }
+  }
+
+  /// The tableau rows containing [symbol], in tableau insertion order.
+  List<_Row> _rowsWithSymbol(_Symbol symbol) {
+    final column = _columns[symbol];
+    if (column == null) return const [];
+    return column.toList(growable: false)
+      ..sort((a, b) => a._order.compareTo(b._order));
+  }
 
   _Row _artificial = _Row(0);
 
@@ -202,7 +326,7 @@ class Solver {
     } else {
       row.solveForSymbol(subject);
       _substitute(subject, row);
-      _rows[subject] = row;
+      _putRow(subject, row);
     }
 
     _constraints[constraint] = tag;
@@ -254,13 +378,11 @@ class Solver {
 
     _removeConstraintEffects(constraint, tag);
 
-    var row = _rows[tag.marker];
-    if (row != null) {
-      _rows.remove(tag.marker);
-    } else {
+    var row = _takeRow(tag.marker);
+    if (row == null) {
       final leaving = _leavingSymbolForMarkerSymbol(tag.marker);
 
-      row = _rows.remove(leaving);
+      row = _takeRow(leaving);
       row!.solveForSymbols(leaving, tag.marker);
       _substitute(tag.marker, row);
     }
@@ -614,7 +736,7 @@ class Solver {
 
   bool _addWithArtificialVariableOnRow(_Row row) {
     final artificial = _Symbol(_SymbolType.slack);
-    _rows[artificial] = _Row.fromRow(row);
+    _putRow(artificial, _Row.fromRow(row));
     _artificial = _Row.fromRow(row);
 
     final result = _optimizeObjectiveRow(_artificial);
@@ -627,9 +749,8 @@ class Solver {
     final success = _nearZero(_artificial.constant);
     _artificial = _Row(0);
 
-    final foundRow = _rows[artificial];
+    final foundRow = _takeRow(artificial);
     if (foundRow != null) {
-      _rows.remove(artificial);
       if (foundRow.cells.isEmpty) {
         return success;
       }
@@ -641,10 +762,10 @@ class Solver {
 
       foundRow.solveForSymbols(artificial, entering);
       _substitute(entering, foundRow);
-      _rows[entering] = foundRow;
+      _putRow(entering, foundRow);
     }
 
-    for (final row in _rows.values) {
+    for (final row in _rowsWithSymbol(artificial)) {
       row.removeSymbol(artificial);
     }
     _objective.removeSymbol(artificial);
@@ -656,9 +777,9 @@ class Solver {
     while (entering.type != _SymbolType.invalid) {
       final leaving = _leavingSymbolForEnteringSymbol(entering);
 
-      final row = _rows.remove(leaving)!..solveForSymbols(leaving, entering);
+      final row = _takeRow(leaving)!..solveForSymbols(leaving, entering);
       _substitute(entering, row);
-      _rows[entering] = row;
+      _putRow(entering, row);
 
       entering = _enteringSymbolForObjectiveRow(objective);
     }
@@ -666,6 +787,24 @@ class Solver {
   }
 
   _Symbol _enteringSymbolForObjectiveRow(_Row objective) {
+    final negative = objective._negativeCells;
+    if (negative != null) {
+      // The first negative, non-dummy cell in insertion order, as the scan
+      // below would find it.
+      _Symbol? entering;
+      var best = 0;
+      final order = objective._cellOrder!;
+      for (final symbol in negative) {
+        if (symbol.type == _SymbolType.dummy) continue;
+        final o = order[symbol]!;
+        if (entering == null || o < best) {
+          entering = symbol;
+          best = o;
+        }
+      }
+      return entering ?? _Symbol(_SymbolType.invalid);
+    }
+
     final cells = objective.cells;
 
     for (final symbol in cells.keys) {
@@ -681,9 +820,8 @@ class Solver {
     var ratio = double.maxFinite;
     _Symbol? result;
 
-    for (final entry in _rows.entries) {
-      final symbol = entry.key;
-      final row = entry.value;
+    for (final row in _rowsWithSymbol(entering)) {
+      final symbol = row._basic!;
       if (symbol.type != _SymbolType.external) {
         final temp = row.coefficientForSymbol(entering);
         if (temp < 0.0) {
@@ -699,12 +837,18 @@ class Solver {
   }
 
   void _substitute(_Symbol symbol, _Row row) {
-    for (final entry in _rows.entries) {
-      final first = entry.key;
-      final second = entry.value;
-      second.substitute(symbol, row);
-      if (first.type != _SymbolType.external && second.constant < 0.0) {
-        _infeasibleRows.add(first);
+    final column = _columns.remove(symbol);
+    if (column != null) {
+      for (final second in column) {
+        second.substitute(symbol, row);
+        _trackSign(second);
+      }
+    }
+    if (_negativeRows.isNotEmpty) {
+      final negative = _negativeRows.toList(growable: false)
+        ..sort((a, b) => a._order.compareTo(b._order));
+      for (final second in negative) {
+        _infeasibleRows.add(second._basic!);
       }
     }
     _objective.substitute(symbol, row);
@@ -745,9 +889,8 @@ class Solver {
 
     _Symbol? first, second, third;
 
-    for (final entry in _rows.entries) {
-      final symbol = entry.key;
-      final row = entry.value;
+    for (final row in _rowsWithSymbol(marker)) {
+      final symbol = row._basic!;
 
       final c = row.coefficientForSymbol(marker);
       if (c == 0.0) {
@@ -788,6 +931,7 @@ class Solver {
         if (row.add(-delta) < 0.0) {
           _infeasibleRows.add(symbol);
         }
+        _trackSign(row);
         return;
       }
 
@@ -798,19 +942,20 @@ class Solver {
         if (row.add(delta) < 0.0) {
           _infeasibleRows.add(symbol);
         }
+        _trackSign(row);
         return;
       }
     }
 
-    for (final entry in _rows.entries) {
-      final symbol = entry.key;
-      final row = entry.value;
+    for (final row in _rowsWithSymbol(info.tag.marker)) {
+      final symbol = row._basic!;
       final coeff = row.coefficientForSymbol(info.tag.marker);
       if (coeff != 0.0 &&
           row.add(delta * coeff) < 0.0 &&
           symbol.type != _SymbolType.external) {
         _infeasibleRows.add(symbol);
       }
+      _trackSign(row);
     }
   }
 
@@ -824,11 +969,11 @@ class Solver {
 
         assert(entering.type != _SymbolType.invalid);
 
-        _rows.remove(leaving);
+        _takeRow(leaving);
 
         row.solveForSymbols(leaving, entering);
         _substitute(entering, row);
-        _rows[entering] = row;
+        _putRow(entering, row);
       }
     }
     return Result.success;
